@@ -1,0 +1,42 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.env
+*.venv/
+.env
+.venv/
+env/
+venv/
+
+# --- VSCode ---
+.vscode/
+*.code-workspace
+
+# --- Docker ---
+# Pastas de volumes locais do docker-compose
+postgres_data/
+minio_data/
+
+# Arquivos temporários de container
+*.pid
+*.log
+
+# --- Dados brutos / MovieLens ---
+data/*.csv
+
+# (Se quiser manter o schema de dados, pode liberar arquivos específicos)
+# !data/README.md
+
+# --- Sistema operacional ---
+.DS_Store
+Thumbs.db
+
+# --- PyCharm / IDEs ---
+.idea/
+
+# --- Arquivos de build e cache ---
+*.egg-info/
+dist/
+build/
