@@ -1,8 +1,6 @@
-version: "3.8"
-
 services:
   postgres:
-    image: postgres:15ss
+    image: postgres:15
     container_name: postgres_movies
     restart: always
     environment:
@@ -12,7 +10,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
 
   pgadmin:
     image: dpage/pgadmin4
@@ -23,6 +21,8 @@ services:
       PGADMIN_DEFAULT_PASSWORD: admin
     ports:
       - "5050:80"
+    depends_on:
+      - postgres
 
   minio:
     image: minio/minio
@@ -35,4 +35,29 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     volumes:
-      - ./minio_data:/data
+      - minio_data:/data
+
+  dataflix-pipeline:
+    build: .
+    container_name: dataflix_pipeline
+    depends_on:
+      - postgres
+      - minio
+    volumes:
+      - ./src:/app
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: moviesdb
+    restart: "no"  # Não reinicia após terminar
+    profiles:
+      - pipeline  # Só roda quando chamado explicitamente
+
+volumes:
+  postgres_data:
+  minio_data:
