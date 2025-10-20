@@ -3,7 +3,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
-from config.db import get_connection
+from settings.db import get_connection
 
 def aggregate_movie_ratings():
     """

@@ -1,5 +1,5 @@
 from minio_client.minio_utils import MinioClient
-from config.db import get_connection, insert_dataframe
+from settings.db import get_connection, insert_dataframe
 from src.pipelines.movielens.silver.transformations import (
     transform_movies,
     transform_movie_genres,
