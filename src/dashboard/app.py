@@ -6,7 +6,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from config.db import get_connection
+from settings.db import get_connection
 
 # Configuração da página
 st.set_page_config(
