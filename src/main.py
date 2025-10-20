@@ -1,4 +1,4 @@
-from src.silver.movie_lens.load_silver import load_silver_pipeline
+from src.pipelines.movielens.silver.load_silver import load_silver_pipeline
 
 def main():
     print("=== Iniciando pipeline Silver ===")

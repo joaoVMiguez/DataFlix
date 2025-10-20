@@ -1,6 +1,6 @@
 from minio_client.minio_utils import MinioClient
 from config.db import get_connection, insert_dataframe
-from src.silver.movie_lens.transformations import (
+from src.pipelines.movielens.silver.transformations import (
     transform_movies,
     transform_movie_genres,
     transform_ratings,
@@ -77,7 +77,7 @@ def load_silver_pipeline(recreate_schema=False):
 
     # Recria schema se solicitado
     if recreate_schema:
-        from src.silver.movie_lens.schemas import create_silver_tables
+        from src.pipelines.movielens.silver.schemas import create_silver_tables
         print("♻️  Recriando schema Silver...")
         create_silver_tables(conn)
         print()
