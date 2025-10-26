@@ -1,22 +1,53 @@
+"""
+Pipeline ULTRA OTIMIZADO - Processamento Paralelo com Threading
+"""
 import pandas as pd
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from datetime import datetime
 import time
+import gc
+import json
+import signal
+import sys
+from pathlib import Path
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 from src.api_clients.tmdb_client import TMDBClient
 from src.minio_client.minio_utils import MinioClient
 from src.settings.db import get_connection
 from src.settings.settings import settings
 from src.utils.logger import setup_logger
 
-logger = setup_logger(__name__, "tmdb_bronze_movies.log")
+logger = setup_logger(__name__, "tmdb_bronze_movies_v3.log")
 
 
-class TMDBMoviesExtractor:
-    """Extrator de dados de filmes do TMDB."""
+class GracefulKiller:
+    """Permite parar pipeline com Ctrl+C sem perder dados."""
+    kill_now = False
     
     def __init__(self):
-        self.tmdb_client = TMDBClient()
+        signal.signal(signal.SIGINT, self.exit_gracefully)
+        signal.signal(signal.SIGTERM, self.exit_gracefully)
+    
+    def exit_gracefully(self, *args):
+        logger.warning("🛑 Sinal de parada recebido! Salvando batch atual...")
+        self.kill_now = True
+
+
+class TMDBMoviesExtractorV3:
+    """Extrator ULTRA otimizado com threading paralelo."""
+    
+    def __init__(self, batch_size: int = 2000, max_workers: int = 10):
+        """
+        Args:
+            batch_size: Filmes por arquivo Parquet (padrão: 2000)
+            max_workers: Threads paralelas (padrão: 10)
+        """
+        self.batch_size = batch_size
+        self.max_workers = max_workers
+        self.killer = GracefulKiller()
+        self.lock = Lock()  # Thread-safe operations
         
         self.minio_client = MinioClient(
             endpoint=settings.MINIO_ENDPOINT,
@@ -26,10 +57,39 @@ class TMDBMoviesExtractor:
         
         self.bucket = settings.BUCKET_BRONZE_TMDB
         self.minio_client.create_bucket(self.bucket)
-        logger.info(f"✅ Bucket {self.bucket} pronto")
+        
+        # Checkpoint file
+        self.checkpoint_file = Path("logs/tmdb_extraction_checkpoint.json")
+        self.checkpoint_file.parent.mkdir(exist_ok=True)
+        
+        logger.info(f"✅ Extrator V3 ULTRA inicializado")
+        logger.info(f"📦 Batch size: {self.batch_size} filmes/arquivo")
+        logger.info(f"🚀 Workers paralelos: {self.max_workers}")
+        logger.info(f"💾 Checkpoint: {self.checkpoint_file}")
     
-    def get_movielens_movies(self, limit: Optional[int] = None, offset: int = 0) -> pd.DataFrame:
-        """Busca filmes do MovieLens com IMDb IDs."""
+    def load_checkpoint(self) -> Dict:
+        """Carrega checkpoint da última execução."""
+        if self.checkpoint_file.exists():
+            with open(self.checkpoint_file, 'r') as f:
+                checkpoint = json.load(f)
+                logger.info(f"🔄 Checkpoint carregado: Batch {checkpoint.get('last_batch', 0)}")
+                return checkpoint
+        return {"last_batch": 0, "completed_batches": [], "total_success": 0, "total_errors": 0}
+    
+    def save_checkpoint(self, checkpoint: Dict):
+        """Salva checkpoint atual (thread-safe)."""
+        with self.lock:
+            with open(self.checkpoint_file, 'w') as f:
+                json.dump(checkpoint, f, indent=2)
+    
+    def clear_checkpoint(self):
+        """Limpa checkpoint."""
+        if self.checkpoint_file.exists():
+            self.checkpoint_file.unlink()
+            logger.info("✅ Checkpoint limpo")
+    
+    def get_movielens_movies(self, limit: Optional[int] = None) -> pd.DataFrame:
+        """Busca filmes do MovieLens."""
         conn = get_connection()
         
         query = """
@@ -46,89 +106,175 @@ class TMDBMoviesExtractor:
         """
         
         if limit:
-            query += f" LIMIT {limit} OFFSET {offset}"
+            query += f" LIMIT {limit}"
         
         df = pd.read_sql(query, conn)
         conn.close()
         
-        logger.info(f"📊 {len(df)} filmes carregados do MovieLens")
+        logger.info(f"📊 {len(df):,} filmes carregados do MovieLens")
         return df
     
-    def get_existing_files(self) -> set:
-        """Retorna set de IDs já extraídos."""
-        try:
-            objects = self.minio_client.list_objects(self.bucket, prefix="movies/")
-            existing = set()
-            for obj in objects:
-                # Extrair ID do nome: "movies/123.parquet" -> 123
-                movie_id = obj.replace("movies/", "").replace(".parquet", "")
-                if movie_id.isdigit():
-                    existing.add(int(movie_id))
-            
-            logger.info(f"📁 {len(existing)} filmes já existem no MinIO")
-            return existing
-        except Exception as e:
-            logger.error(f"❌ Erro ao listar arquivos existentes: {e}")
-            return set()
-    
     def format_imdb_id(self, imdb_id: str) -> str:
-        """Formata IMDb ID para o padrão correto (tt + 7 dígitos)."""
-        imdb_str = str(imdb_id).replace('tt', '')
-        imdb_str = imdb_str.zfill(7)
+        """Formata IMDb ID."""
+        imdb_str = str(imdb_id).replace('tt', '').zfill(7)
         return f"tt{imdb_str}"
     
-    def extract_movie_details(self, imdb_id: str, movie_id: int, title: str) -> Optional[Dict]:
-        """Extrai detalhes de um filme do TMDB."""
-        try:
-            formatted_imdb_id = self.format_imdb_id(imdb_id)
-            
-            result = self.tmdb_client.get_movie_by_imdb_id(formatted_imdb_id)
-            
-            if not result:
-                logger.warning(f"⚠️  Filme não encontrado: {title} (IMDb: {formatted_imdb_id})")
+    def extract_single_movie(self, row: pd.Series, tmdb_client: TMDBClient) -> Optional[Dict]:
+        """
+        Extrai UM filme (thread-safe, cada thread tem seu próprio client).
+        
+        Args:
+            row: Linha do DataFrame com dados do filme
+            tmdb_client: Cliente TMDB (um por thread)
+        """
+        imdb_id = str(row['imdbid'])
+        movie_id = int(row['movieid'])
+        title = row['title']
+        
+        formatted_imdb_id = self.format_imdb_id(imdb_id)
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                result = tmdb_client.get_movie_by_imdb_id(formatted_imdb_id)
+                
+                if not result:
+                    return None
+                
+                tmdb_id = result.get('id')
+                details = tmdb_client.get_movie_details(tmdb_id)
+                
+                if details:
+                    details['movielens_id'] = movie_id
+                    details['imdb_id'] = formatted_imdb_id
+                    details['extracted_at'] = datetime.now().isoformat()
+                    return details
+                
                 return None
             
-            tmdb_id = result.get('id')
-            details = self.tmdb_client.get_movie_details(tmdb_id)
-            
-            if details:
-                details['movielens_id'] = movie_id
-                details['imdb_id'] = formatted_imdb_id
-                details['extracted_at'] = datetime.now().isoformat()
-                
-                return details
-            
-            return None
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    time.sleep(wait_time)
+                else:
+                    logger.debug(f"❌ Falha em {title}: {e}")
+                    return None
         
-        except Exception as e:
-            logger.error(f"❌ Erro ao extrair {title}: {e}")
-            return None
+        return None
     
-    def save_to_minio(self, data: Dict, movie_id: int):
-        """Salva dados no MinIO em formato Parquet."""
-        try:
-            object_name = f"movies/{movie_id}.parquet"
-            self.minio_client.upload_parquet(
-                bucket=self.bucket,
-                object_name=object_name,
-                data=data
-            )
-        except Exception as e:
-            logger.error(f"❌ Erro ao salvar filme {movie_id}: {e}")
-            raise
+    def extract_batch_parallel(self, batch_movies_df: pd.DataFrame) -> tuple[List[Dict], int, int]:
+        """
+        Extrai batch INTEIRO em PARALELO.
+        
+        Args:
+            batch_movies_df: DataFrame com filmes do batch
+            
+        Returns:
+            (lista de dados, sucessos, erros)
+        """
+        batch_data = []
+        batch_success = 0
+        batch_errors = 0
+        
+        # Criar ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Cada thread tem seu próprio TMDBClient (thread-safe)
+            futures = {}
+            
+            for idx, row in batch_movies_df.iterrows():
+                # Criar client por thread (evita conflitos)
+                tmdb_client = TMDBClient()
+                future = executor.submit(self.extract_single_movie, row, tmdb_client)
+                futures[future] = row
+            
+            # Progress bar
+            with tqdm(total=len(futures), desc="Extraindo", unit="filme", leave=False) as pbar:
+                for future in as_completed(futures):
+                    if self.killer.kill_now:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+                    
+                    try:
+                        movie_data = future.result(timeout=30)  # 30s timeout
+                        
+                        if movie_data:
+                            with self.lock:  # Thread-safe append
+                                batch_data.append(movie_data)
+                            batch_success += 1
+                        else:
+                            batch_errors += 1
+                        
+                        pbar.update(1)
+                        pbar.set_postfix({
+                            'Success': batch_success,
+                            'Errors': batch_errors,
+                            'Taxa': f"{batch_success/(batch_success+batch_errors)*100:.1f}%"
+                        })
+                    
+                    except Exception as e:
+                        logger.error(f"❌ Erro na thread: {e}")
+                        batch_errors += 1
+                        pbar.update(1)
+        
+        return batch_data, batch_success, batch_errors
     
-    def extract_batch(
-        self, 
-        batch_size: int = 100, 
-        limit: Optional[int] = None,
-        skip_existing: bool = True
-    ):
-        """Extrai filmes em lotes."""
+    def save_batch_to_minio(self, movies_data: List[Dict], batch_number: int):
+        """Salva batch no MinIO."""
+        if not movies_data:
+            logger.warning(f"⚠️  Batch {batch_number} vazio")
+            return
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                df = pd.DataFrame(movies_data)
+                
+                # ✅ CONVERTER COLUNAS JSON PARA STRING (CORRIGIDO!)
+                json_columns = ['genres', 'production_companies', 'production_countries', 'spoken_languages']
+                for col in json_columns:
+                    if col in df.columns:
+                        # ✅ FIX: Verificar tipo correto
+                        df[col] = df[col].apply(
+                            lambda x: json.dumps(x) if isinstance(x, (list, dict)) else None
+                        )
+                
+                object_name = f"movies_v3/batch_{batch_number:05d}.parquet"
+                
+                self.minio_client.upload_parquet(
+                    bucket=self.bucket,
+                    object_name=object_name,
+                    data=df
+                )
+                
+                logger.info(f"✅ Batch {batch_number} salvo: {len(movies_data)} filmes")
+                return
+            
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = 5 * (attempt + 1)
+                    logger.warning(f"⚠️  Erro ao salvar, tentativa {attempt + 1}: {e}")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"❌ FALHA ao salvar batch {batch_number}: {e}")     
+                    raise
+    
+    def extract_all_movies(self, limit: Optional[int] = None, resume: bool = True):
+        """Extrai todos os filmes com processamento PARALELO."""
         start_time = time.time()
         
         logger.info("=" * 80)
-        logger.info("🎬 INICIANDO EXTRAÇÃO TMDB - BRONZE LAYER (PARQUET)")
+        logger.info("🎬 EXTRAÇÃO TMDB - BRONZE LAYER V3 ULTRA (PARALELO)")
         logger.info("=" * 80)
+        
+        # Checkpoint
+        checkpoint = self.load_checkpoint() if resume else {
+            "last_batch": 0, "completed_batches": [], 
+            "total_success": 0, "total_errors": 0
+        }
+        start_batch = checkpoint["last_batch"] + 1 if resume else 1
+        
+        if resume and checkpoint["last_batch"] > 0:
+            logger.info(f"🔄 Retomando da batch {start_batch}")
         
         # Carregar filmes
         movies_df = self.get_movielens_movies(limit=limit)
@@ -137,124 +283,138 @@ class TMDBMoviesExtractor:
             logger.warning("⚠️  Nenhum filme encontrado")
             return
         
-        # Verificar arquivos existentes
-        existing_ids = set()
-        if skip_existing:
-            existing_ids = self.get_existing_files()
-            movies_df = movies_df[~movies_df['movieid'].isin(existing_ids)]
-            logger.info(f"🔄 {len(movies_df)} filmes restantes para processar")
+        total_movies = len(movies_df)
+        total_batches = (total_movies + self.batch_size - 1) // self.batch_size
         
-        if movies_df.empty:
-            logger.info("✅ Todos os filmes já foram extraídos!")
-            return
-        
-        total = len(movies_df)
-        success_count = 0
-        error_count = 0
-        skipped_count = 0
-        
-        logger.info(f"📊 Total a processar: {total:,}")
-        logger.info(f"📦 Batch size: {batch_size}")
-        
-        if not limit:
-            estimated_hours = (total / 4 / 3600)  # 4 req/s
-            logger.info(f"⏱️  Tempo estimado: {estimated_hours:.1f} horas")
-        
+        logger.info(f"📊 Total de filmes: {total_movies:,}")
+        logger.info(f"📦 Batch size: {self.batch_size}")
+        logger.info(f"📦 Total de batches: {total_batches}")
+        logger.info(f"🚀 Threads paralelas: {self.max_workers}")
         logger.info("=" * 80)
         
-        # Barra de progresso
-        with tqdm(total=total, desc="🎬 Extraindo filmes", unit="filme") as pbar:
-            for idx, row in movies_df.iterrows():
+        success_count = checkpoint["total_success"]
+        error_count = checkpoint["total_errors"]
+        
+        # Processar batches
+        for batch_num in range(start_batch, total_batches + 1):
+            if self.killer.kill_now:
+                logger.warning("🛑 Salvando checkpoint...")
+                self.save_checkpoint(checkpoint)
+                logger.info(f"✅ Progresso salvo: {success_count + error_count}/{total_movies}")
+                sys.exit(0)
+            
+            # Calcular índices
+            start_idx = (batch_num - 1) * self.batch_size
+            end_idx = min(start_idx + self.batch_size, total_movies)
+            batch_movies_df = movies_df.iloc[start_idx:end_idx]
+            
+            batch_start_time = time.time()
+            logger.info(f"📦 Batch {batch_num}/{total_batches} ({len(batch_movies_df)} filmes)...")
+            
+            # EXTRAÇÃO PARALELA 🚀
+            batch_data, batch_success, batch_errors = self.extract_batch_parallel(batch_movies_df)
+            
+            batch_elapsed = time.time() - batch_start_time
+            batch_rate = len(batch_movies_df) / batch_elapsed if batch_elapsed > 0 else 0
+            
+            success_count += batch_success
+            error_count += batch_errors
+            
+            # Salvar batch
+            if batch_data:
                 try:
-                    movie_id = int(row['movieid'])
+                    self.save_batch_to_minio(batch_data, batch_num)
+                    checkpoint["completed_batches"].append(batch_num)
+                    checkpoint["last_batch"] = batch_num
+                    checkpoint["total_success"] = success_count
+                    checkpoint["total_errors"] = error_count
+                    self.save_checkpoint(checkpoint)
                     
-                    # Extrair dados
-                    movie_data = self.extract_movie_details(
-                        imdb_id=str(row['imdbid']),
-                        movie_id=movie_id,
-                        title=row['title']
+                    logger.info(
+                        f"✅ Batch {batch_num}: {batch_success} sucessos, {batch_errors} erros "
+                        f"| ⚡ {batch_rate:.2f} filmes/s | ⏱️ {batch_elapsed/60:.1f}min"
                     )
-                    
-                    if movie_data:
-                        self.save_to_minio(movie_data, movie_id)
-                        success_count += 1
-                        pbar.set_postfix({
-                            'Success': success_count,
-                            'Errors': error_count,
-                            'Taxa': f"{success_count/(success_count+error_count)*100:.1f}%"
-                        })
-                    else:
-                        error_count += 1
-                    
-                    pbar.update(1)
-                    
-                    # Log a cada 100 filmes
-                    if (success_count + error_count) % 100 == 0:
-                        elapsed = time.time() - start_time
-                        rate = (success_count + error_count) / elapsed
-                        remaining = (total - success_count - error_count) / rate if rate > 0 else 0
-                        
-                        logger.info(
-                            f"📈 Progresso: {success_count + error_count:,}/{total:,} "
-                            f"({(success_count + error_count)/total*100:.1f}%) | "
-                            f"✅ {success_count:,} | ❌ {error_count:,} | "
-                            f"⏱️  Restante: {remaining/3600:.1f}h"
-                        )
                 
                 except Exception as e:
-                    logger.error(f"❌ Erro crítico filme {row['movieid']}: {e}")
-                    error_count += 1
-                    pbar.update(1)
+                    logger.error(f"❌ FALHA ao salvar batch {batch_num}: {e}")
+                    sys.exit(1)
+            
+            # Limpar memória
+            del batch_data
+            gc.collect()
+            
+            # Progresso geral
+            progress = (batch_num / total_batches) * 100
+            elapsed = time.time() - start_time
+            rate = (success_count + error_count) / elapsed if elapsed > 0 else 0
+            remaining_movies = total_movies - (success_count + error_count)
+            remaining_time = remaining_movies / rate if rate > 0 else 0
+            
+            logger.info(
+                f"📈 Progresso: {progress:.1f}% | "
+                f"✅ {success_count:,} | ❌ {error_count:,} | "
+                f"⚡ {rate:.2f} filmes/s | "
+                f"⏱️ Restante: {remaining_time/3600:.1f}h"
+            )
+            logger.info("=" * 80)
         
+        # Concluído
         elapsed = time.time() - start_time
         
         logger.info("=" * 80)
         logger.info("🎉 EXTRAÇÃO CONCLUÍDA!")
-        logger.info(f"📊 Total processado: {total:,}")
-        logger.info(f"✅ Sucesso: {success_count:,} ({success_count/total*100:.1f}%)")
-        logger.info(f"❌ Erros: {error_count:,} ({error_count/total*100:.1f}%)")
-        logger.info(f"⏱️  Tempo total: {elapsed/3600:.2f} horas")
-        logger.info(f"⚡ Taxa média: {total/elapsed:.2f} filmes/segundo")
+        logger.info(f"📊 Total: {total_movies:,}")
+        logger.info(f"✅ Sucesso: {success_count:,} ({success_count/total_movies*100:.1f}%)")
+        logger.info(f"❌ Erros: {error_count:,} ({error_count/total_movies*100:.1f}%)")
+        logger.info(f"📦 Batches: {total_batches}")
+        logger.info(f"⏱️ Tempo: {elapsed/3600:.2f}h")
+        logger.info(f"⚡ Taxa média: {(success_count + error_count)/elapsed:.2f} filmes/s")
         logger.info("=" * 80)
+        
+        self.clear_checkpoint()
 
 
-def run_extraction(
-    batch_size: int = 100, 
+def run_extraction_v3(
+    batch_size: int = 2000,
+    max_workers: int = 10,
     limit: Optional[int] = None,
-    skip_existing: bool = True
+    resume: bool = True
 ):
-    """Executa extração."""
-    extractor = TMDBMoviesExtractor()
-    extractor.extract_batch(
-        batch_size=batch_size, 
-        limit=limit,
-        skip_existing=skip_existing
-    )
+    """Executa extração V3 ULTRA com paralelismo."""
+    extractor = TMDBMoviesExtractorV3(batch_size=batch_size, max_workers=max_workers)
+    extractor.extract_all_movies(limit=limit, resume=resume)
 
 
 if __name__ == "__main__":
     import sys
     
-    # Modo TESTE (default)
     if len(sys.argv) == 1:
-        logger.info("🧪 MODO TESTE: Extraindo 10 filmes...")
-        logger.info("💡 Para extrair TODOS: python -m src.pipelines.tmdb.bronze.extract_tmdb_movies --full")
-        run_extraction(batch_size=10, limit=10)
+        logger.info("🧪 MODO TESTE: 1 batch (2000 filmes) com 10 threads")
+        run_extraction_v3(batch_size=2000, max_workers=10, limit=2000, resume=False)
     
-    # Modo PRODUCAO (--full)
     elif "--full" in sys.argv:
-        logger.warning("🚀 MODO PRODUÇÃO: Extraindo TODOS os filmes (~87k)")
-        logger.warning("⏱️  Isso vai levar 6-8 horas. Pressione Ctrl+C para cancelar...")
+        logger.warning("🚀 MODO PRODUÇÃO: TODOS os filmes (PARALELO)")
+        logger.warning("⏱️ Pressione Ctrl+C para pausar (não perde dados)")
         time.sleep(3)
-        run_extraction(batch_size=100, limit=None)
+        run_extraction_v3(batch_size=2000, max_workers=10, limit=None, resume=True)
     
-    # Modo RESUMO (--resume)
     elif "--resume" in sys.argv:
-        logger.info("🔄 MODO RESUMO: Continuando extração anterior...")
-        run_extraction(batch_size=100, limit=None, skip_existing=True)
+        logger.info("🔄 MODO RESUMO: Continuando...")
+        run_extraction_v3(batch_size=2000, max_workers=10, limit=None, resume=True)
+    
+    elif "--reset" in sys.argv:
+        logger.warning("🔄 MODO RESET: Começando do zero")
+        time.sleep(2)
+        run_extraction_v3(batch_size=2000, max_workers=10, limit=None, resume=False)
+    
+    elif "--turbo" in sys.argv:
+        logger.warning("🚀🔥 MODO TURBO: 20 threads paralelas!")
+        time.sleep(2)
+        run_extraction_v3(batch_size=2000, max_workers=20, limit=None, resume=True)
     
     else:
         print("📖 Uso:")
-        print("  python -m src.pipelines.tmdb.bronze.extract_tmdb_movies            # Teste (10 filmes)")
-        print("  python -m src.pipelines.tmdb.bronze.extract_tmdb_movies --full     # Produção (todos)")
-        print("  python -m src.pipelines.tmdb.bronze.extract_tmdb_movies --resume   # Retomar extração")
+        print("  python -m src.pipelines.tmdb.bronze.extract_tmdb_movies              # Teste (10 threads)")
+        print("  python -m src.pipelines.tmdb.bronze.extract_tmdb_movies --full       # Produção (10 threads)")
+        print("  python -m src.pipelines.tmdb.bronze.extract_tmdb_movies --turbo      # TURBO (20 threads)")
+        print("  python -m src.pipelines.tmdb.bronze.extract_tmdb_movies --resume     # Retomar")
