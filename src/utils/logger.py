@@ -1,47 +1,77 @@
 import logging
 import sys
 from pathlib import Path
+from datetime import datetime
 
-def setup_logger(name: str, log_file: str = None) -> logging.Logger:
-    """Configura logger com output para console e arquivo."""
-    from src.settings.settings import settings
+
+def setup_logger(name: str, log_file: str = None, level=logging.INFO):
+    """
+    Configura logger com output para console e arquivo.
     
+    Args:
+        name: Nome do logger (geralmente __name__)
+        log_file: Nome do arquivo de log (opcional)
+        level: Nível de logging (default: INFO)
+    
+    Returns:
+        Logger configurado
+    """
+    # Criar logger
     logger = logging.getLogger(name)
-    logger.setLevel(settings.LOG_LEVEL)
+    logger.setLevel(level)
     
     # Evitar duplicação de handlers
     if logger.handlers:
         return logger
     
-    # Formatter
-    formatter = logging.Formatter(settings.LOG_FORMAT)
+    # Formato do log
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
     
-    # Console Handler com UTF-8
+    # Handler para console (UTF-8)
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(level)
     console_handler.setFormatter(formatter)
     
-    # Forçar UTF-8 no console (Windows fix)
-    if sys.platform == "win32":
-        import codecs
-        sys.stdout = codecs.getwriter("utf-8")(sys.stdout.buffer, 'strict')
+    # Configurar encoding UTF-8 para console
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
     
     logger.addHandler(console_handler)
     
-    # File Handler (opcional)
+    # Handler para arquivo (se especificado)
     if log_file:
-        settings.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        # Criar diretório de logs se não existir
+        log_dir = Path("logs")
+        log_dir.mkdir(exist_ok=True)
+        
+        # Adicionar timestamp ao nome do arquivo
+        timestamp = datetime.now().strftime("%Y%m%d")
+        log_path = log_dir / f"{timestamp}_{log_file}"
+        
         file_handler = logging.FileHandler(
-            settings.LOGS_DIR / log_file,
+            log_path,
+            mode='a',
             encoding='utf-8'
         )
-        file_handler.setLevel(logging.DEBUG)
+        file_handler.setLevel(level)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
     
     return logger
 
 
-def get_logger(name: str) -> logging.Logger:
-    """Retorna logger existente ou cria um novo."""
-    return logging.getLogger(name)
+def get_logger(name: str, level=logging.INFO): 
+    """
+    Retorna logger simples sem arquivo.
+    
+    Args:
+        name: Nome do logger
+        level: Nível de logging
+    
+    Returns:
+        Logger configurado
+    """
+    return setup_logger(name, log_file=None, level=level)
