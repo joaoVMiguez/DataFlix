@@ -57,7 +57,18 @@ def get_studio_performance(
     try:
         conn = get_connection()
         query = f"""
-        SELECT *
+        SELECT 
+            company_id,
+            company_name,
+            total_movies,
+            total_budget,
+            total_revenue,
+            total_profit,
+            avg_roi,
+            profitable_movies,
+            success_rate,
+            top_movie_title,
+            top_movie_revenue
         FROM gold_tmdb.fact_studio_performance
         ORDER BY total_revenue DESC
         LIMIT {limit}
