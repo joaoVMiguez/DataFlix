@@ -25,25 +25,21 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PAGES_DIR = os.path.join(CURRENT_DIR, "pages")
 
 # ==================== PÁGINAS ====================
-pages_dict = {
-    "🏠 Home": [
-        st.Page(os.path.join(PAGES_DIR, "home.py"), title="Home", icon="🏠", default=True)
-    ],
-    "📊 Análises": [
-        st.Page(os.path.join(PAGES_DIR, "movielens.py"), title="MovieLens", icon="🎬")
-    ]
-}
+pages_list = [
+    st.Page(os.path.join(PAGES_DIR, "home.py"), title="Home", icon="🏠", default=True),
+    st.Page(os.path.join(PAGES_DIR, "movielens.py"), title="MovieLens", icon="🎬")
+]
 
 if has_tmdb:
-    pages_dict["📊 Análises"].append(
+    pages_list.append(
         st.Page(os.path.join(PAGES_DIR, "tmdb.py"), title="TMDB", icon="📊")
     )
 
 if has_box_office:
-    pages_dict["📊 Análises"].append(
+    pages_list.append(
         st.Page(os.path.join(PAGES_DIR, "box_office.py"), title="Box Office", icon="💰")
     )
 
 # ==================== NAVEGAÇÃO ====================
-pg = st.navigation(pages_dict)
+pg = st.navigation(pages_list)
 pg.run()

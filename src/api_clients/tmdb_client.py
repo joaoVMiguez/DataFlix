@@ -1,72 +1,133 @@
-from typing import Dict, List, Optional
-from src.api_clients.base_client import BaseAPIClient
-from src.settings.settings import settings
-from src.utils.logger import get_logger
+# dashboard/components/navigation.py
 
-logger = get_logger(__name__)
+import streamlit as st
 
-
-class TMDBClient(BaseAPIClient):
-    """Cliente para interagir com a API do TMDB."""
+def render_navigation(current_page=""):
+    """
+    Renderiza a barra de navegação usando widgets Streamlit, com CSS para fixação e estilo.
+    """
     
-    def __init__(self):
-        super().__init__(
-            base_url=settings.TMDB_BASE_URL,
-            api_key=settings.TMDB_API_KEY,
-            rate_limit=1 / settings.TMDB_MAX_REQUESTS_PER_SECOND
+    # Mapeamento para garantir que o st.switch_page funcione
+    page_map = {
+        "home": "pages/home.py",
+        "movielens": "pages/movielens.py",
+        "tmdb": "pages/tmdb.py",
+        "box_office": "pages/box_office.py",
+    }
+    
+    # ==================== CSS para Fixar a Barra e Estilizar ====================
+    st.markdown("""
+    <style>
+    /* 1. Ocultar Cabeçalho/Rodapé padrão do Streamlit */
+    header[data-testid="stHeader"] {
+        display: none !important;
+    }
+
+    /* 2. Padding para o corpo da página (dando espaço para a barra fixa) */
+    /* Este seletor atinge o container principal do conteúdo */
+    .main .block-container {
+        padding-top: 5rem !important; /* Altura da barra fixa + espaço */
+        padding-left: 2rem;
+        padding-right: 2rem;
+        max-width: 1400px; 
+    }
+
+    /* 3. Container da Barra de Navegação Streamlit (st.columns) - FIXAÇÃO */
+    /* ATENÇÃO: Seletor AGRESSIVO para fixar o primeiro elemento da página */
+    div[data-testid="stVerticalBlock"] > div:nth-child(1) {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 1000;
+        background: white; 
+        border-bottom: 1px solid #e5e7eb;
+        padding: 0.75rem 2rem; 
+    }
+    
+    /* 4. Ocultar rótulos (Labels) que st.columns adiciona (para evitar quebras de layout) */
+    div[data-testid="stVerticalBlock"] > div:nth-child(1) label {
+        display: none;
+    }
+
+    /* 5. Estilo dos botões de navegação (para parecerem links) */
+    .nav-button button {
+        background: transparent !important;
+        color: #666 !important; /* Cor padrão do link */
+        border: none !important;
+        box-shadow: none !important;
+        font-weight: 500 !important;
+        padding: 0.5rem 0.5rem !important;
+        transition: all 0.2s !important;
+        min-height: 0 !important; /* Ajuste fino */
+        height: 100%;
+    }
+
+    /* 6. Estilo do botão ativo */
+    .nav-button.active button {
+        color: #667eea !important; /* Cor do link ativo */
+        font-weight: 700 !important;
+        border-bottom: 2px solid #667eea !important;
+        border-radius: 0 !important;
+    }
+    
+    /* 7. Hover effect */
+    .nav-button button:hover {
+        color: #667eea !important;
+        background: rgba(102, 126, 234, 0.1) !important;
+    }
+
+    /* 8. Botão roxo primário padrão (Mantido para os cards de exploração) */
+    .stButton button {
+        background: #667eea !important;
+        color: white !important;
+        border-radius: 8px !important;
+        padding: 0.5rem 1.5rem !important;
+        font-weight: 600 !important;
+    }
+
+    </style>
+    """, unsafe_allow_html=True)
+
+    # ==================== BARRA DE NAVEGAÇÃO STREAMLIT (Widgets Funcionais) ====================
+    
+    # 1. Colunas para Logo e Links
+    # Ajustamos o espaçamento para centralizar os links na direita
+    col_logo, col_spacer, col_nav = st.columns([2, 5, 5])
+
+    # 2. Logo em HTML puro (para evitar quebras no CSS)
+    with col_logo:
+        st.markdown(
+            """
+            <div style='display: flex; align-items: center; height: 100%;'>
+                <span style='font-size: 1.5rem; margin-right: 0.5rem;'>📊</span>
+                <span style='font-size: 1.2rem; font-weight: 700; color: #667eea;'>DataFlix Analytics</span>
+            </div>
+            """, unsafe_allow_html=True
         )
-        logger.info("✅ TMDBClient inicializado")
-    
-    def _setup_session(self):
-        """Configura autenticação via query parameter."""
-        self.session.params = {"api_key": self.api_key}
-    
-    def get_movie_details(self, tmdb_id: int) -> Dict:
-        """Obtém detalhes completos de um filme."""
-        endpoint = f"movie/{tmdb_id}"
-        params = {
-            "append_to_response": "credits,keywords,videos,release_dates"
-        }
+
+    # 3. Links de Navegação (st.button)
+    with col_nav:
+        # Colunas menores para os 4 botões de navegação
+        nav_cols = st.columns(4)
         
-        logger.debug(f"Buscando detalhes do filme TMDB ID: {tmdb_id}")
-        return self._make_request(endpoint, params)
-    
-    def search_movie(self, title: str, year: Optional[int] = None) -> List[Dict]:
-        """Busca filme por título e ano."""
-        endpoint = "search/movie"
-        params = {"query": title}
-        
-        if year:
-            params["year"] = year
-        
-        logger.debug(f"Buscando: {title} ({year or 'qualquer ano'})")
-        response = self._make_request(endpoint, params)
-        return response.get("results", [])
-    
-    def get_movie_by_imdb_id(self, imdb_id: str) -> Dict:
-        """Busca filme pelo ID do IMDb."""
-        endpoint = f"find/{imdb_id}"
-        params = {"external_source": "imdb_id"}
-        
-        logger.debug(f"Buscando por IMDb ID: {imdb_id}")
-        response = self._make_request(endpoint, params)
-        results = response.get("movie_results", [])
-        
-        return results[0] if results else {}
-    
-    def get_credits(self, tmdb_id: int) -> Dict:
-        """Obtém elenco e equipe de um filme."""
-        endpoint = f"movie/{tmdb_id}/credits"
-        return self._make_request(endpoint)
-    
-    def get_poster_url(self, poster_path: str, size: str = "w500") -> str:
-        """Constrói URL completa do poster."""
-        if not poster_path:
-            return ""
-        return f"{settings.TMDB_IMAGE_BASE_URL}{size}{poster_path}"
-    
-    def get_backdrop_url(self, backdrop_path: str, size: str = "w1280") -> str:
-        """Constrói URL completa do backdrop."""
-        if not backdrop_path:
-            return ""
-        return f"{settings.TMDB_IMAGE_BASE_URL}{size}{backdrop_path}"
+        links = [
+            ("Home", "home", "🏠"),
+            ("MovieLens", "movielens", "🎬"),
+            ("TMDB", "tmdb", "📊"),
+            ("Box Office", "box_office", "💰"),
+        ]
+
+        for idx, (label, key_name, emoji) in enumerate(links):
+            with nav_cols[idx]:
+                # Adiciona uma div com a classe CSS para estilizar o botão Streamlit
+                css_class = "nav-button active" if key_name == current_page else "nav-button"
+                st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
+                
+                # O botão Streamlit real
+                if st.button(f"{emoji} {label}", key=f"nav_btn_{key_name}", use_container_width=True):
+                    # Se o botão for clicado, navega
+                    if key_name in page_map:
+                        st.switch_page(page_map[key_name])
+                
+                st.markdown('</div>', unsafe_allow_html=True)

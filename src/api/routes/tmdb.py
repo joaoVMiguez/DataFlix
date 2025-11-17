@@ -1,195 +1,62 @@
-from fastapi import APIRouter, HTTPException, Query
-from typing import Optional
-import pandas as pd
-from settings.db import get_connection
+"""
+TMDB API endpoints
+"""
+from fastapi import APIRouter, Depends, Query
+from ..repositories.tmdb_repository import TMDBRepository
+from ..services.tmdb_service import TMDBService
+from ..models.tmdb import TMDBResponse, CountryPerformance, StudioPerformance, MovieFinancial
+from ..models.common import SuccessResponse
+from ..dependencies import get_tmdb_repository
 
-router = APIRouter(
-    prefix="/tmdb",
-    tags=["TMDB"]
-)
+router = APIRouter(prefix="/tmdb", tags=["TMDB"])
 
-@router.get("/box-office")
-def get_box_office(
-    limit: int = Query(20, ge=1, le=100, description="Número de filmes")
+@router.get("/analytics", response_model=SuccessResponse[TMDBResponse])
+async def get_tmdb_analytics(
+    repo: TMDBRepository = Depends(get_tmdb_repository)
 ):
     """
-    Retorna dados de bilheteria (receita, orçamento, ROI).
+    Get complete TMDB analytics including:
+    - Revenue, budget and profit statistics
+    - Top movies by revenue
+    - Average financial metrics
     """
-    try:
-        conn = get_connection()
-        query = f"""
-        SELECT 
-            movielens_id,
-            title,
-            release_year,
-            budget,
-            revenue,
-            profit,
-            roi,
-            payback_ratio,
-            budget_category,
-            revenue_category,
-            roi_category,
-            is_profitable,
-            is_blockbuster
-        FROM gold_tmdb.fact_box_office
-        WHERE revenue > 0
-        ORDER BY revenue DESC
-        LIMIT {limit}
-        """
-        df = pd.read_sql(query, conn)
-        
-        return {
-            "total": len(df),
-            "data": df.to_dict(orient="records")
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    service = TMDBService(repo)
+    data = service.get_analytics()
+    return SuccessResponse(data=data, message="TMDB analytics retrieved successfully")
 
-
-@router.get("/studio-performance")
-def get_studio_performance(
-    limit: int = Query(20, ge=1, le=100)
+@router.get("/countries", response_model=SuccessResponse[list[CountryPerformance]])
+async def get_country_performance(
+    limit: int = Query(10, ge=1, le=50, description="Maximum results"),
+    repo: TMDBRepository = Depends(get_tmdb_repository)
 ):
     """
-    Retorna performance dos estúdios de produção.
+    Get performance metrics by country
     """
-    try:
-        conn = get_connection()
-        query = f"""
-        SELECT 
-            company_id,
-            company_name,
-            total_movies,
-            total_budget,
-            total_revenue,
-            total_profit,
-            avg_roi,
-            profitable_movies,
-            success_rate,
-            top_movie_title,
-            top_movie_revenue
-        FROM gold_tmdb.fact_studio_performance
-        ORDER BY total_revenue DESC
-        LIMIT {limit}
-        """
-        df = pd.read_sql(query, conn)
-        
-        return {
-            "total_studios": len(df),
-            "data": df.to_dict(orient="records")
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    service = TMDBService(repo)
+    data = service.get_country_performance(limit)
+    return SuccessResponse(data=data, message="Country performance retrieved successfully")
 
-
-@router.get("/country-performance")
-def get_country_performance():
-    """
-    Retorna performance por país de produção.
-    """
-    try:
-        conn = get_connection()
-        query = """
-        SELECT 
-            country_code,
-            country_name,
-            total_movies,
-            avg_budget,
-            avg_revenue,
-            avg_roi,
-            total_profit,
-            top_genre,
-            most_prolific_studio
-        FROM gold_tmdb.fact_country_performance
-        ORDER BY avg_revenue DESC
-        """
-        df = pd.read_sql(query, conn)
-        
-        return {
-            "total_countries": len(df),
-            "data": df.to_dict(orient="records")
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/movies")
-def get_tmdb_movies(
-    limit: int = Query(50, ge=1, le=500),
-    min_budget: Optional[float] = Query(None, ge=0),
-    min_revenue: Optional[float] = Query(None, ge=0),
-    year: Optional[int] = Query(None, ge=1900, le=2024)
+@router.get("/studios", response_model=SuccessResponse[list[StudioPerformance]])
+async def get_studio_performance(
+    limit: int = Query(10, ge=1, le=50, description="Maximum results"),
+    repo: TMDBRepository = Depends(get_tmdb_repository)
 ):
     """
-    Busca filmes do TMDB com filtros.
+    Get performance metrics by studio/production company
     """
-    try:
-        conn = get_connection()
-        
-        query = """
-        SELECT *
-        FROM gold_tmdb.dim_movies_tmdb
-        WHERE 1=1
-        """
-        
-        params = []
-        
-        if min_budget:
-            query += " AND budget >= %s"
-            params.append(min_budget)
-        
-        if min_revenue:
-            query += " AND revenue >= %s"
-            params.append(min_revenue)
-        
-        if year:
-            query += " AND release_year = %s"
-            params.append(year)
-        
-        query += f" ORDER BY revenue DESC LIMIT {limit}"
-        
-        df = pd.read_sql(query, conn, params=params)
-        
-        return {
-            "total": len(df),
-            "filters": {
-                "min_budget": min_budget,
-                "min_revenue": min_revenue,
-                "year": year
-            },
-            "data": df.to_dict(orient="records")
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    service = TMDBService(repo)
+    data = service.get_studio_performance(limit)
+    return SuccessResponse(data=data, message="Studio performance retrieved successfully")
 
-
-@router.get("/stats")
-def get_tmdb_stats():
+@router.get("/search", response_model=SuccessResponse[list[MovieFinancial]])
+async def search_tmdb_movies(
+    q: str = Query(..., min_length=1, description="Search query"),
+    limit: int = Query(20, ge=1, le=100, description="Maximum results"),
+    repo: TMDBRepository = Depends(get_tmdb_repository)
+):
     """
-    Estatísticas gerais do catálogo TMDB.
+    Search movies in TMDB data
     """
-    try:
-        conn = get_connection()
-        query = """
-        SELECT 
-            COUNT(*) as total_movies,
-            SUM(budget) as total_budget,
-            SUM(revenue) as total_revenue,
-            AVG(vote_average) as avg_rating,
-            SUM(vote_count) as total_votes
-        FROM gold_tmdb.dim_movies_tmdb
-        WHERE budget > 0 AND revenue > 0
-        """
-        df = pd.read_sql(query, conn)
-        result = df.iloc[0].to_dict()
-        
-        return {
-            "total_movies": int(result['total_movies']),
-            "total_budget": float(result['total_budget']),
-            "total_revenue": float(result['total_revenue']),
-            "avg_rating": float(result['avg_rating']),
-            "total_votes": int(result['total_votes'])
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    service = TMDBService(repo)
+    results = service.search_movies(q, limit)
+    return SuccessResponse(data=results, message=f"Found {len(results)} movies")

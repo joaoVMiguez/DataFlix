@@ -1,197 +1,114 @@
-from fastapi import APIRouter, HTTPException, Query
+"""
+MovieLens API endpoints
+"""
+from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional
-import pandas as pd
-from settings.db import get_connection
+from ..repositories.movielens_repository import MovieLensRepository
+from ..services.movielens_service import MovieLensService
+from ..models.movielens import MovieLensResponse, MovieSearchResult, GenreStats
+from ..models.common import SuccessResponse, PaginatedResponse
+from ..dependencies import get_movielens_repository
 
-router = APIRouter(
-    prefix="/movielens",
-    tags=["MovieLens"]
-)
+router = APIRouter(prefix="/movielens", tags=["MovieLens"])
 
-@router.get("/top-movies")
-def get_top_movies(
-    limit: int = Query(10, ge=1, le=100, description="Número de filmes a retornar")
+@router.get("/analytics", response_model=SuccessResponse[MovieLensResponse])
+async def get_movielens_analytics(
+    repo: MovieLensRepository = Depends(get_movielens_repository)
 ):
     """
-    Retorna os top filmes mais bem avaliados do MovieLens.
+    Get complete MovieLens analytics including:
+    - General statistics
+    - Top rated movies
+    - Genre statistics
+    """
+    service = MovieLensService(repo)
+    data = service.get_analytics()
+    return SuccessResponse(data=data, message="MovieLens analytics retrieved successfully")
+
+# ============ NOVA ROTA DE PAGINAÇÃO ============
+@router.get("/movies", response_model=SuccessResponse[PaginatedResponse])
+async def get_movies_paginated(
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(10, ge=1, le=100, description="Items per page"),
+    genre: Optional[str] = Query(None, description="Filter by genre"),
+    repo: MovieLensRepository = Depends(get_movielens_repository)
+):
+    """
+    Get paginated list of top movies
     
-    - **limit**: número de filmes (padrão: 10, máx: 100)
+    - **page**: Page number (starts at 1)
+    - **page_size**: Number of items per page (max 100)
+    - **genre**: Optional genre filter
     """
-    try:
-        conn = get_connection()
-        query = f"""
-        SELECT 
-            movieid,
-            title,
-            release_year,
-            avg_rating,
-            total_ratings,
-            genres
-        FROM gold.vw_top_movies
-        LIMIT {limit}
-        """
-        df = pd.read_sql(query, conn)
-        
-        if df.empty:
-            return {"message": "Nenhum filme encontrado", "data": []}
-        
-        return {
-            "total": len(df),
-            "data": df.to_dict(orient="records")
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    service = MovieLensService(repo)
+    data = service.get_movies_paginated(page=page, page_size=page_size, genre=genre)
+    return SuccessResponse(data=data, message=f"Retrieved page {page} of movies")
 
-
-@router.get("/genres")
-def get_genre_stats():
-    """
-    Retorna estatísticas de performance por gênero.
-    """
-    try:
-        conn = get_connection()
-        query = """
-        SELECT * FROM gold.vw_genre_performance
-        ORDER BY total_movies DESC
-        """
-        df = pd.read_sql(query, conn)
-        
-        return {
-            "total_genres": len(df),
-            "data": df.to_dict(orient="records")
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/movies-by-decade")
-def get_movies_by_decade():
-    """
-    Retorna estatísticas de filmes agrupados por década.
-    """
-    try:
-        conn = get_connection()
-        query = """
-        SELECT * FROM gold.vw_movies_by_decade
-        ORDER BY decade
-        """
-        df = pd.read_sql(query, conn)
-        
-        return {
-            "total_decades": len(df),
-            "data": df.to_dict(orient="records")
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/search")
-def search_movies(
-    title: Optional[str] = Query(None, description="Buscar por título"),
-    genre: Optional[str] = Query(None, description="Filtrar por gênero"),
-    year_min: Optional[int] = Query(None, ge=1900, description="Ano mínimo"),
-    year_max: Optional[int] = Query(None, le=2024, description="Ano máximo"),
-    rating_min: Optional[float] = Query(None, ge=0, le=5, description="Rating mínimo"),
-    limit: int = Query(50, ge=1, le=500, description="Limite de resultados")
+@router.get("/search", response_model=SuccessResponse[list[MovieSearchResult]])
+async def search_movies(
+    q: str = Query(..., min_length=1, description="Search query"),
+    genre: Optional[str] = Query(None, description="Filter by genre"),
+    limit: int = Query(20, ge=1, le=100, description="Maximum results"),
+    repo: MovieLensRepository = Depends(get_movielens_repository)
 ):
     """
-    Busca filmes com filtros avançados.
+    Search movies by title with optional genre filter
     """
-    try:
-        conn = get_connection()
-        
-        query = """
-        SELECT 
-            m.movieid,
-            m.title,
-            m.release_year,
-            m.avg_rating,
-            m.total_ratings,
-            STRING_AGG(g.genre_name, ', ' ORDER BY g.genre_name) as genres
-        FROM gold.dim_movies m
-        LEFT JOIN gold.fact_movie_genres fmg ON m.movieid = fmg.movieid
-        LEFT JOIN gold.dim_genres g ON fmg.genre_id = g.genre_id
-        WHERE 1=1
-        """
-        
-        params = []
-        
-        if title:
-            query += " AND LOWER(m.title) LIKE LOWER(%s)"
-            params.append(f"%{title}%")
-        
-        if year_min:
-            query += " AND m.release_year >= %s"
-            params.append(year_min)
-        
-        if year_max:
-            query += " AND m.release_year <= %s"
-            params.append(year_max)
-        
-        if rating_min:
-            query += " AND m.avg_rating >= %s"
-            params.append(rating_min)
-        
-        query += """
-        GROUP BY m.movieid, m.title, m.release_year, m.avg_rating, m.total_ratings
-        """
-        
-        if genre:
-            query += " HAVING STRING_AGG(g.genre_name, ', ' ORDER BY g.genre_name) LIKE %s"
-            params.append(f"%{genre}%")
-        
-        query += f" ORDER BY m.total_ratings DESC LIMIT {limit}"
-        
-        df = pd.read_sql(query, conn, params=params)
-        
-        return {
-            "total": len(df),
-            "filters": {
-                "title": title,
-                "genre": genre,
-                "year_range": [year_min, year_max],
-                "rating_min": rating_min
-            },
-            "data": df.to_dict(orient="records")
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    service = MovieLensService(repo)
+    results = service.search_movies(q, genre, limit)
+    return SuccessResponse(data=results, message=f"Found {len(results)} movies")
 
+@router.get("/movies/{movie_id}")
+async def get_movie_details(
+    movie_id: int,
+    repo: MovieLensRepository = Depends(get_movielens_repository)
+):
+    """
+    Get detailed information about a specific movie
+    """
+    service = MovieLensService(repo)
+    movie = service.get_movie_details(movie_id)
+    
+    if not movie:
+        raise HTTPException(status_code=404, detail=f"Movie with ID {movie_id} not found")
+    
+    return SuccessResponse(data=movie, message="Movie details retrieved successfully")
 
-@router.get("/stats")
-def get_overall_stats():
+@router.get("/genres", response_model=SuccessResponse[list[GenreStats]])
+async def get_genres(
+    repo: MovieLensRepository = Depends(get_movielens_repository)
+):
     """
-    Retorna estatísticas gerais do catálogo MovieLens.
+    Get all genres with statistics
     """
-    try:
-        conn = get_connection()
-        query = """
-        SELECT 
-            COUNT(*) as total_movies,
-            COALESCE(SUM(total_ratings), 0) as total_ratings,
-            COALESCE(
-                ROUND(
-                    CASE
-                        WHEN SUM(total_ratings) > 0
-                        THEN (SUM(avg_rating * total_ratings) / SUM(total_ratings))::numeric
-                        ELSE 0
-                    END,
-                    2
-                ),
-                0
-            ) as overall_avg_rating,
-            COUNT(DISTINCT CASE WHEN total_ratings > 0 THEN movieid END) as rated_movies
-        FROM gold.dim_movies
-        WHERE avg_rating IS NOT NULL AND total_ratings > 0
-        """
-        df = pd.read_sql(query, conn)
-        result = df.iloc[0].to_dict()
-        
-        return {
-            "total_movies": int(result['total_movies']),
-            "total_ratings": int(result['total_ratings']),
-            "overall_avg_rating": float(result['overall_avg_rating']),
-            "rated_movies": int(result['rated_movies'])
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    service = MovieLensService(repo)
+    genres = service.get_genres()
+    return SuccessResponse(data=genres, message="Genres retrieved successfully")
+
+# ============ ROTAS PARA GRÁFICOS ============
+@router.get("/charts/genre-distribution")
+async def get_genre_distribution(
+    repo: MovieLensRepository = Depends(get_movielens_repository)
+):
+    """Get data for genre distribution chart"""
+    service = MovieLensService(repo)
+    data = service.get_genre_distribution()
+    return SuccessResponse(data=data, message="Chart data retrieved")
+
+@router.get("/charts/movies-by-decade")
+async def get_movies_by_decade(
+    repo: MovieLensRepository = Depends(get_movielens_repository)
+):
+    """Get movies count grouped by decade"""
+    service = MovieLensService(repo)
+    data = service.get_movies_by_decade()
+    return SuccessResponse(data=data, message="Chart data retrieved")
+
+@router.get("/charts/rating-distribution")
+async def get_rating_distribution(
+    repo: MovieLensRepository = Depends(get_movielens_repository)
+):
+    """Get distribution of ratings"""
+    service = MovieLensService(repo)
+    data = service.get_rating_distribution()
+    return SuccessResponse(data=data, message="Chart data retrieved")

@@ -1,0 +1,30 @@
+# API Framework - VERSÕES ATUALIZADAS
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.10.0
+pydantic-settings>=2.6.0
+
+# Database
+sqlalchemy>=2.0.35
+psycopg[binary]>=3.2.0
+
+# Data Processing (já instalados)
+numpy>=1.26.0
+pandas>=2.1.0
+pyarrow>=14.0.0
+
+# MinIO
+minio>=7.2.0
+
+# HTTP Client
+httpx>=0.27.0
+requests>=2.32.0
+
+# Dashboard (Streamlit)
+streamlit>=1.28.0
+plotly>=5.18.0
+altair>=5.1.0
+
+# Utilities
+python-dotenv>=1.0.0
+python-multipart>=0.0.6
